@@ -10,6 +10,7 @@ import json
 import shutil
 import subprocess
 import sys
+from core.env_utils import save_python_path, load_python_path, check_pyinstaller, install_pyinstaller, save_pyinstaller_path, load_pyinstaller_path
 
 class MainWindow(QMainWindow):
     log_signal = pyqtSignal(str)
@@ -24,6 +25,7 @@ class MainWindow(QMainWindow):
         icon_path = self.resource_path('resources/icons/favicon.ico')
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
+        self._pyinstaller_path = load_pyinstaller_path()  # 启动时自动读取
         self.init_ui()
         self.init_signals()
         # 信号连接
@@ -50,7 +52,7 @@ class MainWindow(QMainWindow):
         self.data_table = QTableWidget(0, 2)
         self.data_table.setHorizontalHeaderLabels(["源文件", "目标路径"])
         self.data_table.horizontalHeader().setStretchLastSection(True)
-        self.data_table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.SelectedClicked)
+        self.data_table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.SelectedClicked | QAbstractItemView.EditKeyPressed)
         self.data_add_btn = QPushButton("添加")
         self.data_rm_btn = QPushButton("移除")
         self.cb_noconsole = QCheckBox("隐藏终端窗口")
@@ -214,7 +216,10 @@ class MainWindow(QMainWindow):
             row = self.data_table.rowCount()
             self.data_table.insertRow(row)
             self.data_table.setItem(row, 0, QTableWidgetItem(f))
-            self.data_table.setItem(row, 1, QTableWidgetItem("."))
+            # 目标路径默认可编辑
+            dst_item = QTableWidgetItem(".")
+            dst_item.setFlags(dst_item.flags() | Qt.ItemIsEditable)
+            self.data_table.setItem(row, 1, dst_item)
             self.log_signal.emit(f"已添加数据文件: {f}")
 
     def remove_data_file(self):
@@ -478,7 +483,8 @@ class MainWindow(QMainWindow):
                     self.log_signal.emit("⚠️ 警告：未检测到打包完成信号，UI未自动恢复，请检查日志！")
                     self._warned_no_end = True
         self.packager = Packager(
-            py_path=proj_path,
+            py_path=self.python_path,
+            proj_path=proj_path,
             entry=entry,
             icon=icon if icon else None,
             datas=datas,
@@ -486,7 +492,8 @@ class MainWindow(QMainWindow):
             out_dir=out_dir,
             log_callback=final_log_cb,
             progress_callback=progress_cb,
-            use_pyinstaller_exe=getattr(self, '_use_pyinstaller_exe', False)
+            use_pyinstaller_exe=bool(self._pyinstaller_path),
+            pyinstaller_path=self._pyinstaller_path if self._pyinstaller_path else None
         )
         # 安全/快速超时只做日志提示
         def safety_timeout():
@@ -507,17 +514,18 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "提示", "输出目录无效！")
 
     def cancel_packaging(self):
-        if hasattr(self, 'packager') and self.packager and hasattr(self.packager, 'proc') and self.packager.proc:
-            try:
+        try:
+            if hasattr(self, 'packager') and self.packager and hasattr(self.packager, 'proc') and self.packager.proc:
                 self.packager.proc.terminate()
-                self.log_signal.emit("打包进程已被用户取消。");
-                self._in_packaging = False
-                self.set_ui_enabled(True)
-                self.hide_mask()
-            except Exception as e:
-                self.log_signal.emit(f"取消失败: {e}")
-        else:
-            self.log_signal.emit("当前无正在进行的打包任务。")
+                self.log_signal.emit("打包进程已被用户取消。")
+            else:
+                self.log_signal.emit("当前无正在进行的打包任务。")
+        except Exception as e:
+            self.log_signal.emit(f"取消失败: {e}")
+        finally:
+            self._in_packaging = False
+            self.set_ui_enabled(True)
+            self.hide_mask()
 
     def get_config(self):
         # 收集当前界面所有参数
@@ -568,7 +576,9 @@ class MainWindow(QMainWindow):
             row = self.data_table.rowCount()
             self.data_table.insertRow(row)
             self.data_table.setItem(row, 0, QTableWidgetItem(item['src']))
-            self.data_table.setItem(row, 1, QTableWidgetItem(item['dst']))
+            dst_item = QTableWidgetItem(item['dst'])
+            dst_item.setFlags(dst_item.flags() | Qt.ItemIsEditable)
+            self.data_table.setItem(row, 1, dst_item)
 
     def save_config_action(self):
         cfg = self.get_config()
@@ -600,38 +610,37 @@ class MainWindow(QMainWindow):
             self.log_signal.emit(f"已导入配置: {file}")
 
     def check_env(self):
-        pyinstaller_path = shutil.which('pyinstaller')
-        self.log_signal.emit(f"pyinstaller_path: {pyinstaller_path}")
-        if not pyinstaller_path:
-            # 额外检测常见环境的Scripts目录
-            possible_dirs = []
-            for base in [os.getcwd(), os.path.expanduser('~')]:
-                for venv_dir in ['.venv', 'venv', 'env', 'Scripts']:
-                    d = os.path.join(base, venv_dir)
-                    exe = os.path.join(d, 'pyinstaller.exe')
-                    if os.path.exists(exe):
-                        possible_dirs.append(exe)
-            if possible_dirs:
-                pyinstaller_path = possible_dirs[0]
-                self.log_signal.emit(f'在其他目录发现pyinstaller: {pyinstaller_path}')
-        self._use_pyinstaller_exe = False
-        pyinstaller_ok = False
-        if pyinstaller_path:
+        # 优先使用已保存的 python_path
+        python_path = getattr(self, 'python_path', None) or load_python_path()
+        pyinstaller_path = getattr(self, '_pyinstaller_path', None) or load_pyinstaller_path()
+        if not python_path:
+            self.log_signal.emit('未选择Python解释器，无法检测PyInstaller环境')
+            QMessageBox.warning(self, '环境检测', '请先选择Python解释器！')
+            self.start_btn.setEnabled(False)
+            self.cancel_btn.setEnabled(False)
+            return
+        self.python_path = python_path
+        save_python_path(python_path)
+        self._pyinstaller_path = pyinstaller_path
+        # 检查 pyinstaller 路径
+        if pyinstaller_path and os.path.isfile(pyinstaller_path):
             try:
                 result = subprocess.run([pyinstaller_path, '--version'], capture_output=True, text=True)
-                pyinstaller_ok = result.returncode == 0
+                ok = result.returncode == 0
                 self.log_signal.emit(f"检测命令: {pyinstaller_path} --version")
                 self.log_signal.emit(f"检测输出: {result.stdout.strip()} {result.stderr.strip()}")
-                if pyinstaller_ok:
-                    self._use_pyinstaller_exe = True
-                    self._pyinstaller_path = pyinstaller_path
+                if ok:
+                    self.set_ui_enabled(True)
+                    self.start_btn.setEnabled(True)
+                    self.cancel_btn.setEnabled(True)
+                    self.log_signal.emit(f"PyInstaller 检测通过: {pyinstaller_path}")
+                    return
             except Exception as e:
                 self.log_signal.emit(f"检测异常: {e}")
-                pyinstaller_ok = False
-        msg = ''
-        if not pyinstaller_ok:
-            msg += '未检测到PyInstaller，点击"一键安装PyInstaller"或"选择pyinstaller.exe"手动指定。'
-        if msg:
+        # 否则用 check_pyinstaller 检查
+        py_ok = check_pyinstaller(python_path)
+        if not py_ok:
+            msg = '未检测到PyInstaller，点击"一键安装PyInstaller"进行安装。'
             QMessageBox.critical(self, '环境检测失败', msg)
             self.start_btn.setEnabled(False)
             self.cancel_btn.setEnabled(False)
@@ -639,6 +648,7 @@ class MainWindow(QMainWindow):
             self.set_ui_enabled(True)
             self.start_btn.setEnabled(True)
             self.cancel_btn.setEnabled(True)
+            self.log_signal.emit(f"PyInstaller 检测通过: {python_path}")
 
     def select_python(self):
         # 弹出可选python列表
@@ -648,6 +658,7 @@ class MainWindow(QMainWindow):
             item, ok = QInputDialog.getItem(self, "选择Python解释器", "可用环境:", items, 0, False)
             if ok and item:
                 self.python_path = item
+                save_python_path(item)
                 self.log_signal.emit(f"已选择Python解释器: {item}")
                 self.check_env()
                 return
@@ -655,39 +666,33 @@ class MainWindow(QMainWindow):
         file, _ = QFileDialog.getOpenFileName(self, "选择Python解释器", filter="可执行文件 (*.exe)")
         if file:
             self.python_path = file
+            save_python_path(file)
             self.log_signal.emit(f"已选择Python解释器: {file}")
             self.check_env()
 
     def install_pyinstaller(self):
-        if not hasattr(self, 'python_path') or not self.python_path:
+        python_path = getattr(self, 'python_path', None) or load_python_path()
+        if not python_path:
             QMessageBox.warning(self, "提示", "请先选择Python解释器！")
             return
         self.log_signal.emit("正在安装PyInstaller...")
-        try:
-            result = subprocess.run([self.python_path, '-m', 'pip', 'install', 'pyinstaller'], capture_output=True, text=True)
-            if result.returncode == 0:
-                self.log_signal.emit("PyInstaller安装成功！")
-                # 安装后立即检测
-                check_result = subprocess.run([self.python_path, '-m', 'pyinstaller', '--version'], capture_output=True, text=True)
-                self.log_signal.emit(f"检测命令: {self.python_path} -m pyinstaller --version")
-                self.log_signal.emit(f"检测结果: {check_result.stdout.strip()} {check_result.stderr.strip()}")
-                if check_result.returncode == 0:
-                    QMessageBox.information(self, "成功", "PyInstaller安装并检测成功！")
-                else:
-                    QMessageBox.warning(self, "警告", "PyInstaller安装后检测失败，请检查Python环境！")
-                self.check_env()
+        ok = install_pyinstaller(python_path)
+        if ok:
+            self.log_signal.emit("PyInstaller安装成功！")
+            if check_pyinstaller(python_path):
+                QMessageBox.information(self, "成功", "PyInstaller安装并检测成功！")
             else:
-                self.log_signal.emit(f"PyInstaller安装失败: {result.stderr}")
-                QMessageBox.warning(self, "失败", "PyInstaller安装失败，请检查日志！")
-        except Exception as e:
-            self.log_signal.emit(f"安装异常: {e}")
-            QMessageBox.warning(self, "失败", f"安装异常: {e}")
+                QMessageBox.warning(self, "警告", "PyInstaller安装后检测失败，请检查Python环境！")
+            self.check_env()
+        else:
+            self.log_signal.emit(f"PyInstaller安装失败")
+            QMessageBox.warning(self, "失败", "PyInstaller安装失败，请检查日志！")
 
     def select_pyinstaller_exe(self):
         file, _ = QFileDialog.getOpenFileName(self, "选择pyinstaller.exe", filter="可执行文件 (*.exe)")
         if file:
             self._pyinstaller_path = file
-            self._use_pyinstaller_exe = True
+            save_pyinstaller_path(file)  # 保存路径
             self.log_signal.emit(f"已手动指定pyinstaller.exe: {file}")
             # 立即检测
             try:
