@@ -64,15 +64,6 @@ python项目打包工具/
 └─ README.md
 ```
 
-## 打包命令示例
-
-```bash
-pyinstaller -F -w --icon=resources/icons/favicon.ico ^
-  --add-data "resources/icons/favicon.ico;resources/icons" ^
-  --add-data "resources/loading/loading.gif;resources/loading" ^
-  main.py
-```
-
 ## 截图预览
 
 ![效果演示](/image.png)
