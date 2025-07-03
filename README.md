@@ -54,6 +54,7 @@ python项目打包工具/
 ├─ core/
 │   ├─ packager.py
 │   ├─ config.py
+│   ├─ env_utils.py
 │   └─ utils.py
 ├─ resources/
 │   ├─ icons/
